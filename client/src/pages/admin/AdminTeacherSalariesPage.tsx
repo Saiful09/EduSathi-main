@@ -1,0 +1,1167 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Wallet,
+  Plus,
+  Search,
+  CheckCircle2,
+  Clock,
+  ArrowUpRight,
+  DollarSign,
+  Building,
+  CreditCard,
+  FileSpreadsheet,
+  Printer,
+  X,
+  FileText,
+  Landmark
+} from 'lucide-react';
+import { api } from '../../lib/api';
+import { TeacherSalary, User } from '../../types';
+import { MonthYearPicker } from '../../components/common/MonthYearPicker';
+import { formatCourseOption, formatUserOption } from '../../lib/formatters';
+
+export const AdminTeacherSalariesPage: React.FC = () => {
+  const [salaries, setSalaries] = useState<TeacherSalary[]>([]);
+  const [summary, setSummary] = useState<any>(null);
+  const [teachers, setTeachers] = useState<User[]>([]);
+  const [courses, setCourses] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Filters
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [periodFilter, setPeriodFilter] = useState('all');
+  const [departmentFilter, setDepartmentFilter] = useState('all');
+
+  // Pagination (10 per page)
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 10;
+
+  // Disbursement Modal State
+  const [showModal, setShowModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [disbursingId, setDisbursingId] = useState<string | null>(null);
+  const [teacherAssignedCourses, setTeacherAssignedCourses] = useState<any[]>([]);
+  const [loadingTeacherCourses, setLoadingTeacherCourses] = useState(false);
+
+  const [formData, setFormData] = useState({
+    teacher_id: '',
+    course_id: '',
+    amount: '',
+    pay_period: 'October 2026',
+    payment_date: new Date().toISOString().split('T')[0],
+    payment_method: 'BEFTN / Bank Transfer',
+    transaction_ref: `SAL-${Date.now().toString().slice(-6)}`,
+    status: 'paid' as 'paid' | 'pending',
+    note: '',
+  });
+
+  // Pay Slip / Voucher Modal State
+  const [viewingVoucher, setViewingVoucher] = useState<TeacherSalary | null>(null);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const [salariesData, summaryData, teachersData, coursesData] = await Promise.all([
+        api.getTeacherSalaries(),
+        api.getTeacherSalariesSummary(),
+        api.getUsers({ role: 'teacher' }),
+        api.getCourses().catch(() => []),
+      ]);
+      setSalaries(salariesData || []);
+      setSummary(summaryData || null);
+      setTeachers(teachersData || []);
+      setCourses(coursesData || []);
+
+      if (teachersData && teachersData.length > 0 && !formData.teacher_id) {
+        setFormData(prev => ({ ...prev, teacher_id: teachersData[0].id }));
+      }
+    } catch (err: any) {
+      console.error('Failed to load salary management data:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  // Fetch only courses assigned to the selected teacher
+  useEffect(() => {
+    if (!formData.teacher_id) {
+      setTeacherAssignedCourses([]);
+      return;
+    }
+
+    let active = true;
+    setLoadingTeacherCourses(true);
+    api.getTeacherFinanceDetails(formData.teacher_id)
+      .then((res: any) => {
+        if (active) {
+          const assigned = res?.assigned_courses || [];
+          setTeacherAssignedCourses(assigned);
+          // If selected course is not in teacher's assigned courses, reset to all
+          if (formData.course_id && !assigned.some((c: any) => c.id === formData.course_id)) {
+            setFormData(prev => ({ ...prev, course_id: '' }));
+          }
+        }
+      })
+      .catch((err: any) => {
+        console.error('Failed to load teacher assigned courses:', err);
+        if (active) setTeacherAssignedCourses([]);
+      })
+      .finally(() => {
+        if (active) setLoadingTeacherCourses(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [formData.teacher_id]);
+
+  // Reset page to 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, periodFilter, departmentFilter]);
+
+  const handleCreateSalary = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formData.teacher_id || !formData.amount) return;
+
+    setSubmitting(true);
+    try {
+      await api.recordTeacherSalary(formData);
+      setShowModal(false);
+      setFormData({
+        teacher_id: teachers[0]?.id || '',
+        course_id: '',
+        amount: '',
+        pay_period: 'October 2026',
+        payment_date: new Date().toISOString().split('T')[0],
+        payment_method: 'BEFTN / Bank Transfer',
+        transaction_ref: `SAL-${Date.now().toString().slice(-6)}`,
+        status: 'paid',
+        note: '',
+      });
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to record salary disbursement');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Click on pending salary badge to automatically disburse it
+  const handleDisbursePending = async (sal: TeacherSalary) => {
+    if (sal.status === 'paid') return;
+    const confirmDisburse = window.confirm(
+      `Disburse salary voucher of ৳ ${Number(sal.amount).toLocaleString()} for ${sal.teacher_name || 'Faculty Member'}?\n\nThis will mark the voucher as Disbursed, credit the amount to the teacher's compensation account, and deduct it from institutional cash reserves.`
+    );
+    if (!confirmDisburse) return;
+
+    setDisbursingId(sal.id);
+    try {
+      await api.disburseTeacherSalary(sal.id);
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to disburse salary voucher');
+    } finally {
+      setDisbursingId(null);
+    }
+  };
+
+  // Helper: Monogram initials for faculty
+  const getInitials = (name?: string) => {
+    if (!name) return 'FC';
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+  };
+
+  const filteredSalaries = useMemo(() => {
+    return salaries.filter(s => {
+      const matchSearch =
+        (s.teacher_name && s.teacher_name.toLowerCase().includes(search.toLowerCase())) ||
+        (s.teacher_email && s.teacher_email.toLowerCase().includes(search.toLowerCase())) ||
+        (s.transaction_ref && s.transaction_ref.toLowerCase().includes(search.toLowerCase())) ||
+        s.pay_period.toLowerCase().includes(search.toLowerCase());
+
+      const matchStatus = statusFilter === 'all' || s.status === statusFilter;
+      const matchPeriod = periodFilter === 'all' || s.pay_period === periodFilter;
+      const matchDept = departmentFilter === 'all' || (s.teacher_department || 'Academic Faculty') === departmentFilter;
+
+      return matchSearch && matchStatus && matchPeriod && matchDept;
+    });
+  }, [salaries, search, statusFilter, periodFilter, departmentFilter]);
+
+  const uniquePeriods = useMemo(() => {
+    const set = new Set(salaries.map(s => s.pay_period));
+    return Array.from(set);
+  }, [salaries]);
+
+  const uniqueDepartments = useMemo(() => {
+    const set = new Set<string>();
+    teachers.forEach(t => {
+      if (t.department) set.add(t.department);
+    });
+    salaries.forEach(s => {
+      if (s.teacher_department) set.add(s.teacher_department);
+    });
+    return Array.from(set);
+  }, [teachers, salaries]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredSalaries.length / pageSize));
+  const startIndex = (currentPage - 1) * pageSize;
+  const paginatedSalaries = useMemo(() => {
+    return filteredSalaries.slice(startIndex, startIndex + pageSize);
+  }, [filteredSalaries, startIndex, pageSize]);
+
+  const filteredTotals = useMemo(() => {
+    return filteredSalaries.reduce(
+      (acc, s) => ({
+        total: acc.total + Number(s.amount || 0),
+        disbursed: acc.disbursed + (s.status === 'paid' ? Number(s.amount || 0) : 0),
+        pending: acc.pending + (s.status === 'pending' ? Number(s.amount || 0) : 0),
+      }),
+      { total: 0, disbursed: 0, pending: 0 }
+    );
+  }, [filteredSalaries]);
+
+  const handleExportCSV = () => {
+    if (salaries.length === 0) return;
+    const headers = [
+      'Transaction Ref',
+      'Faculty Member',
+      'Department',
+      'Email',
+      'Pay Period',
+      'Disbursement Date',
+      'Amount (BDT)',
+      'Payment Rail',
+      'Status',
+      'Notes'
+    ];
+    const rows = filteredSalaries.map(s => [
+      s.transaction_ref || 'N/A',
+      s.teacher_name || 'N/A',
+      s.teacher_department || 'Academic Faculty',
+      s.teacher_email || 'N/A',
+      s.pay_period,
+      s.payment_date ? new Date(s.payment_date).toLocaleDateString() : 'N/A',
+      s.amount || 0,
+      s.payment_method || 'N/A',
+      s.status,
+      s.note || ''
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `Faculty_Payroll_Ledger_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="space-y-6 pb-24 text-slate-900">
+      {/* Institutional Top Command Bar */}
+      <div className="border border-slate-300 bg-white p-5 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+
+            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+              Teacher Salary &amp; Compensation Ledger
+            </h1>
+            <p className="text-xs text-slate-600 mt-1">
+              Official faculty compensation disbursements, instructional load honoraria &amp; monthly payroll clearing in Bangladeshi Taka (৳).
+            </p>
+          </div>
+
+          {/* Action Bar */}
+          <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+            <button
+              onClick={handleExportCSV}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium text-xs shadow-sm transition"
+              title="Export filtered payroll ledger as CSV"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
+              <span>Export CSV</span>
+            </button>
+
+            <button
+              onClick={() => setShowModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-medium text-xs shadow-sm transition"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Disburse Salary</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* High-Density Financial Metrics Strip */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Metric 1: Total Disbursed */}
+        <div className="border border-slate-300 bg-white p-4 shadow-sm flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-slate-500 mb-1">
+              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold text-emerald-800">Total Disbursed</span>
+              <DollarSign className="w-4 h-4 text-emerald-700" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-emerald-700 mt-1">
+              ৳ {Number(summary?.total_disbursed || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Cumulative faculty salaries cleared
+            </p>
+          </div>
+          <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+            <span>Cleared Vouchers</span>
+            <span className="font-bold text-slate-800">{salaries.filter(s => s.status === 'paid').length} Processed</span>
+          </div>
+        </div>
+
+        {/* Metric 2: Main Institutional Cash Reserves */}
+        <div className="border border-slate-300 bg-white p-4 shadow-sm flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-slate-500 mb-1">
+              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold text-blue-800">Main Cash Reserves</span>
+              <Landmark className="w-4 h-4 text-blue-700" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-blue-700 mt-1">
+              ৳ {Number(summary?.main_cash_balance !== undefined ? summary.main_cash_balance : ((summary?.total_collected || 0) - (summary?.total_disbursed || 0))).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Realized tuition collected less faculty payroll
+            </p>
+          </div>
+          <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+            <span>Institutional Cash</span>
+            <span className="font-bold text-slate-800">Main Treasury Account</span>
+          </div>
+        </div>
+
+        {/* Metric 3: Pending Approvals */}
+        <div className="border border-slate-300 bg-white p-4 shadow-sm flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-slate-500 mb-1">
+              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold text-amber-800">Pending Approvals</span>
+              <Clock className="w-4 h-4 text-amber-600" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-amber-700 mt-1">
+              ৳ {Number(summary?.pending_disbursements || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Click &quot;Pending&quot; in table to disburse instantly
+            </p>
+          </div>
+          <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+            <span>Pending Vouchers</span>
+            <span className="font-bold text-amber-800">{salaries.filter(s => s.status === 'pending').length} Actionable</span>
+          </div>
+        </div>
+
+        {/* Metric 4: Faculty on Payroll */}
+        <div className="border border-slate-300 bg-white p-4 shadow-sm flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-slate-500 mb-1">
+              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold">Faculty on Payroll</span>
+              <Building className="w-4 h-4 text-slate-600" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-slate-900 mt-1">
+              {summary?.faculty_on_payroll || teachers.length}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Active instructional faculty members
+            </p>
+          </div>
+          <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+            <span>Academic Faculty Pool</span>
+            <span className="font-bold text-slate-800">{teachers.length} Registered</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Controls Bar: Search, Status, Pay Period & Department */}
+      <div className="border border-slate-300 bg-white p-3.5 shadow-sm flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+        {/* Search */}
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search faculty name, email, or reference code..."
+            className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-300 focus:outline-none focus:border-slate-900 bg-white placeholder:text-slate-400 font-medium"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Filter Selectors */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Status Tab Group */}
+          <div className="inline-flex border border-slate-300 bg-slate-50 p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setStatusFilter('all')}
+              className={`px-3 py-1 text-[11px] font-mono transition ${statusFilter === 'all'
+                  ? 'bg-white text-slate-900 font-bold shadow-xs border border-slate-200'
+                  : 'text-slate-600 hover:text-slate-900'
+                }`}
+            >
+              All ({salaries.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('paid')}
+              className={`px-3 py-1 text-[11px] font-mono transition ${statusFilter === 'paid'
+                  ? 'bg-white text-emerald-800 font-bold shadow-xs border border-slate-200'
+                  : 'text-slate-600 hover:text-slate-900'
+                }`}
+            >
+              Disbursed ({salaries.filter(s => s.status === 'paid').length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('pending')}
+              className={`px-3 py-1 text-[11px] font-mono transition ${statusFilter === 'pending'
+                  ? 'bg-white text-amber-800 font-bold shadow-xs border border-slate-200'
+                  : 'text-slate-600 hover:text-slate-900'
+                }`}
+            >
+              Pending ({salaries.filter(s => s.status === 'pending').length})
+            </button>
+          </div>
+
+          {/* Pay Period Selector */}
+          <div className="flex items-center border border-slate-300 bg-white px-2.5 py-1 text-xs">
+            <span className="text-[10px] font-mono uppercase text-slate-400 mr-2">Period:</span>
+            <select
+              value={periodFilter}
+              onChange={(e) => setPeriodFilter(e.target.value)}
+              className="bg-transparent font-medium text-slate-800 text-xs focus:outline-none cursor-pointer"
+            >
+              <option value="all">All Pay Periods</option>
+              {uniquePeriods.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Department Selector */}
+          {uniqueDepartments.length > 0 && (
+            <div className="flex items-center border border-slate-300 bg-white px-2.5 py-1 text-xs">
+              <span className="text-[10px] font-mono uppercase text-slate-400 mr-2">Dept:</span>
+              <select
+                value={departmentFilter}
+                onChange={(e) => setDepartmentFilter(e.target.value)}
+                className="bg-transparent font-medium text-slate-800 text-xs focus:outline-none cursor-pointer"
+              >
+                <option value="all">All Departments</option>
+                {uniqueDepartments.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Institutional Faculty Payroll Ledger Table */}
+      {loading ? (
+        <div className="border border-slate-300 bg-white p-12 text-center shadow-sm">
+          <div className="w-8 h-8 border-2 border-slate-900 border-t-transparent animate-spin mx-auto mb-3" />
+          <p className="text-xs font-mono uppercase tracking-wider text-slate-500">
+            Compiling Faculty Payroll &amp; Compensation Matrix...
+          </p>
+        </div>
+      ) : filteredSalaries.length === 0 ? (
+        <div className="border border-slate-300 bg-white p-12 text-center shadow-sm">
+          <Wallet className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+          <h3 className="text-sm font-bold text-slate-800 uppercase font-mono">No Payroll Records Match Criteria</h3>
+          <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+            {search || statusFilter !== 'all' || periodFilter !== 'all' || departmentFilter !== 'all'
+              ? 'No disbursement records match your active search filters. Try clearing queries.'
+              : 'The faculty compensation register currently has no recorded vouchers.'}
+          </p>
+          {(search || statusFilter !== 'all' || periodFilter !== 'all' || departmentFilter !== 'all') && (
+            <button
+              onClick={() => {
+                setSearch('');
+                setStatusFilter('all');
+                setPeriodFilter('all');
+                setDepartmentFilter('all');
+              }}
+              className="mt-3 px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition"
+            >
+              Clear All Filters
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="border border-slate-300 bg-white shadow-sm overflow-hidden">
+          <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-bold uppercase tracking-wider font-mono text-slate-800">
+                Faculty Compensation &amp; Payroll Ledger Register
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Official instructional disbursements, banking clearing channels, and comptroller vouchers.
+              </p>
+            </div>
+            <span className="text-[11px] font-mono text-slate-600 font-semibold self-start sm:self-auto">
+              Showing {filteredSalaries.length > 0 ? startIndex + 1 : 0} to {Math.min(startIndex + pageSize, filteredSalaries.length)} of {filteredSalaries.length} vouchers (Page {currentPage} of {totalPages})
+            </span>
+          </div>
+
+          {/* Desktop / Laptop View: Unaltered Table */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-100 border-b border-slate-200 text-[10px] font-mono uppercase tracking-wider text-slate-600">
+                  <th className="py-2.5 px-4 font-bold">Faculty Member</th>
+                  <th className="py-2.5 px-4 font-bold">Department</th>
+                  <th className="py-2.5 px-4 font-bold">Pay Period</th>
+                  <th className="py-2.5 px-4 font-bold">Course(s) Mentioned</th>
+                  <th className="py-2.5 px-4 font-bold">Disbursement Date</th>
+                  <th className="py-2.5 px-4 font-bold">Payment Rail</th>
+                  <th className="py-2.5 px-4 font-bold">Transaction Ref</th>
+                  <th className="py-2.5 px-4 font-bold text-right">Disbursed (৳)</th>
+                  <th className="py-2.5 px-4 font-bold text-center">Status</th>
+                  <th className="py-2.5 px-4 font-bold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {paginatedSalaries.map((sal) => (
+                  <tr key={sal.id} className="hover:bg-slate-50/75 transition">
+                    {/* Faculty Member */}
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2.5">
+                        {sal.teacher_avatar ? (
+                          <img
+                            src={sal.teacher_avatar}
+                            alt={sal.teacher_name || 'Faculty'}
+                            className="w-8 h-8 rounded-none object-cover border border-slate-300 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-8 h-8 bg-slate-100 border border-slate-300 text-slate-700 font-mono font-bold text-xs flex items-center justify-center shrink-0">
+                            {getInitials(sal.teacher_name)}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate">
+                            {sal.teacher_name || 'Faculty Member'}
+                          </div>
+                          <div className="text-[10px] text-slate-500 font-mono truncate max-w-[150px]">
+                            {sal.teacher_email}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Department */}
+                    <td className="py-3 px-4 text-slate-700">
+                      <span className="px-2 py-0.5 bg-slate-100 border border-slate-200 text-slate-800 text-[10px] font-mono">
+                        {sal.teacher_department || 'Academic Faculty'}
+                      </span>
+                    </td>
+
+                    {/* Pay Period */}
+                    <td className="py-3 px-4 whitespace-nowrap font-mono font-semibold text-slate-800">
+                      {sal.pay_period}
+                    </td>
+
+                    {/* Course(s) Mentioned */}
+                    <td className="py-3 px-4">
+                      {sal.course_title ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            {sal.subject_code || 'CRS'}
+                          </span>
+                          <span className="font-semibold text-slate-800 line-clamp-1 max-w-[160px]">
+                            {sal.course_title}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-mono text-slate-500">
+                          All Assigned Courses
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Disbursement Date */}
+                    <td className="py-3 px-4 whitespace-nowrap text-slate-600 font-mono text-[11px]">
+                      {sal.payment_date ? new Date(sal.payment_date).toLocaleDateString() : 'N/A'}
+                    </td>
+
+                    {/* Payment Rail */}
+                    <td className="py-3 px-4 whitespace-nowrap">
+                      <span className="inline-block px-2 py-0.5 bg-slate-50 border border-slate-200 text-slate-700 font-mono text-[10px]">
+                        {sal.payment_method || 'Bank Transfer'}
+                      </span>
+                    </td>
+
+                    {/* Transaction Ref */}
+                    <td className="py-3 px-4 whitespace-nowrap font-mono text-[11px] font-bold text-slate-700">
+                      {sal.transaction_ref || 'TRX-DEFAULT'}
+                    </td>
+
+                    {/* Amount Disbursed */}
+                    <td className="py-3 px-4 text-right whitespace-nowrap font-mono font-bold text-slate-900">
+                      ৳ {Number(sal.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+
+                    {/* Status - Clickable to instantly disburse */}
+                    <td className="py-3 px-4 whitespace-nowrap text-center">
+                      {sal.status === 'paid' ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono uppercase font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          <span>Disbursed</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleDisbursePending(sal)}
+                          disabled={disbursingId === sal.id}
+                          title="Click to disburse this pending salary instantly and deduct from main cash"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-mono uppercase font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 hover:border-amber-400 transition cursor-pointer shadow-2xs group"
+                        >
+                          <Clock className={`w-3 h-3 text-amber-700 ${disbursingId === sal.id ? 'animate-spin' : 'group-hover:scale-110'} transition`} />
+                          <span>{disbursingId === sal.id ? 'Disbursing...' : 'Pending (Click to Disburse)'}</span>
+                        </button>
+                      )}
+                    </td>
+
+                    {/* Actions */}
+                    <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <button
+                        onClick={() => setViewingVoucher(sal)}
+                        className="px-2.5 py-1 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium text-xs shadow-xs transition inline-flex items-center gap-1"
+                        title="View official disbursement voucher slip"
+                      >
+                        <FileText className="w-3 h-3 text-slate-500" />
+                        <span>Voucher</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile View: High-Readability Vertical Cards */}
+          <div className="block md:hidden p-3.5 space-y-3.5 bg-slate-50/60">
+            {paginatedSalaries.map((sal) => (
+              <div key={sal.id} className="p-4 space-y-3 bg-white rounded-2xl border border-slate-200/90 shadow-2xs max-w-full overflow-hidden break-words">
+                {/* Faculty Header */}
+                <div className="flex items-start justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    {sal.teacher_avatar ? (
+                      <img
+                        src={sal.teacher_avatar}
+                        alt={sal.teacher_name || 'Faculty'}
+                        className="w-10 h-10 rounded-xl object-cover border border-slate-200 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 bg-slate-100 border border-slate-200 text-slate-700 font-mono font-bold text-xs flex items-center justify-center shrink-0 rounded-xl">
+                        {getInitials(sal.teacher_name)}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-extrabold text-slate-900 text-sm leading-snug truncate">
+                        {sal.teacher_name || 'Faculty Member'}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono truncate mt-0.5">
+                        {sal.teacher_email}
+                      </div>
+                    </div>
+                  </div>
+
+                  <span className="px-2 py-0.5 bg-slate-100 border border-slate-200 text-slate-800 text-[10px] font-mono shrink-0 max-w-[120px] truncate">
+                    {sal.teacher_department || 'Academic'}
+                  </span>
+                </div>
+
+                {/* Pay Period & Course Scope */}
+                <div className="bg-slate-50/80 p-2.5 rounded-xl border border-slate-100 space-y-1 text-xs break-words">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <span className="font-mono font-bold text-slate-800">{sal.pay_period}</span>
+                    <span className="text-[11px] text-slate-500 font-mono">
+                      {sal.payment_date ? new Date(sal.payment_date).toLocaleDateString() : 'Pending'}
+                    </span>
+                  </div>
+                  {sal.course_title ? (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5 min-w-0">
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0">
+                        {sal.subject_code || 'CRS'}
+                      </span>
+                      <span className="font-medium text-slate-800 break-words">
+                        {sal.course_title}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-[11px] font-mono text-slate-500 block">All Assigned Courses</span>
+                  )}
+                </div>
+
+                {/* Amount, Rail & Status */}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs pt-0.5">
+                  <div>
+                    <span className="text-[9px] text-slate-400 font-bold uppercase block">Compensation</span>
+                    <span className="font-mono font-black text-slate-900 text-sm">
+                      ৳ {Number(sal.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+
+                  <div className="shrink-0">
+                    {sal.status === 'paid' ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-mono uppercase font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                        <span>Disbursed</span>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleDisbursePending(sal)}
+                        disabled={disbursingId === sal.id}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-mono uppercase font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded transition"
+                      >
+                        <Clock className={`w-3 h-3 text-amber-700 shrink-0 ${disbursingId === sal.id ? 'animate-spin' : ''}`} />
+                        <span>{disbursingId === sal.id ? 'Disbursing...' : 'Disburse Now'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                  <span className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono shrink-0">
+                    {sal.payment_method || 'Bank Transfer'}
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-400 truncate max-w-[180px]">
+                    Ref: {sal.transaction_ref || 'TRX-DEFAULT'}
+                  </span>
+                </div>
+
+                {/* Voucher button */}
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setViewingVoucher(sal)}
+                    className="w-full py-2 px-3 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-xl shadow-2xs transition inline-flex items-center justify-center gap-1.5 truncate"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>View Payroll Voucher</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Pagination Controls - 10 per page */}
+          {totalPages > 1 && (
+            <div className="px-4 py-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="text-slate-500 font-mono text-[11px]">
+                Showing <strong className="text-slate-900">{startIndex + 1}</strong> to <strong className="text-slate-900">{Math.min(startIndex + pageSize, filteredSalaries.length)}</strong> of <strong className="text-slate-900">{filteredSalaries.length}</strong> payroll vouchers
+              </div>
+
+              <div className="flex items-center gap-1 font-mono">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-2.5 py-1 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  Previous
+                </button>
+
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
+                  <button
+                    key={pageNum}
+                    type="button"
+                    onClick={() => setCurrentPage(pageNum)}
+                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold transition border ${
+                      currentPage === pageNum
+                        ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                        : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-300'
+                    }`}
+                  >
+                    {pageNum}
+                  </button>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="px-2.5 py-1 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Table Summary Footer */}
+          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs font-mono">
+            <div className="text-slate-500">
+              Filtered Payroll Summary: <strong className="text-slate-800">{filteredSalaries.length}</strong> vouchers
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-slate-600">
+              <span>Total Disbursed: <strong className="text-emerald-700">৳ {filteredTotals.disbursed.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></span>
+              <span>•</span>
+              <span>Pending Clearance: <strong className="text-amber-700">৳ {filteredTotals.pending.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></span>
+              <span>•</span>
+              <span>Gross Voucher Sum: <strong className="text-slate-900">৳ {filteredTotals.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Disburse Salary Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="border border-slate-300 bg-white max-w-xl w-full max-h-[90vh] flex flex-col shadow-xl my-auto">
+            <div className="flex items-center justify-between p-5 border-b border-slate-200 shrink-0 bg-white">
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold">
+                  Office of the Comptroller • Form SAL-01
+                </div>
+                <h3 className="text-base font-bold text-slate-900 mt-0.5">
+                  Record Faculty Salary Disbursement
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 border border-slate-200 hover:border-slate-400 transition"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSalary} className="flex flex-col flex-1 overflow-hidden">
+              <div className="p-5 overflow-y-auto flex-1 space-y-4">
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                  Select Faculty Instructor *
+                </label>
+                <select
+                  value={formData.teacher_id}
+                  onChange={(e) => setFormData({ ...formData, teacher_id: e.target.value })}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-900"
+                >
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id} title={`${t.full_name} (${t.email})`}>
+                      {formatUserOption(t.full_name, t.department || t.email)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Disbursement Amount (৳ BDT) *
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    value={formData.amount}
+                    onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                    placeholder="45000.00"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-900 font-mono font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Pay Period *
+                  </label>
+                  <MonthYearPicker
+                    value={formData.pay_period}
+                    onChange={(val) => setFormData((prev) => ({ ...prev, pay_period: val }))}
+                  />
+                </div>
+              </div>
+
+              {/* Course Allocation Selector - Restricted to Assigned Courses */}
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                  Course Allocation / Recommended Assigned Courses
+                </label>
+                <select
+                  value={formData.course_id}
+                  onChange={(e) => setFormData({ ...formData, course_id: e.target.value })}
+                  disabled={loadingTeacherCourses}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-900 disabled:opacity-50"
+                >
+                  <option value="">All Assigned Courses (General Load)</option>
+                  {teacherAssignedCourses.map((c: any) => (
+                    <option key={c.id} value={c.id} title={c.title}>
+                      {formatCourseOption(c.title, c.subject_code)}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-400 font-mono mt-0.5">
+                  {loadingTeacherCourses
+                    ? 'Loading courses assigned to this instructor...'
+                    : teacherAssignedCourses.length > 0
+                    ? `Showing ${teacherAssignedCourses.length} course(s) assigned to this instructor.`
+                    : 'No courses currently assigned to this instructor. Disbursement applies to general faculty load.'}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Payment Method
+                  </label>
+                  <select
+                    value={formData.payment_method}
+                    onChange={(e) => setFormData({ ...formData, payment_method: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-900"
+                  >
+                    <option value="BEFTN / Bank Transfer">BEFTN / Bank Transfer</option>
+                    <option value="City Bank Direct">City Bank Direct</option>
+                    <option value="Dutch-Bangla Bank (DBBL)">Dutch-Bangla Bank (DBBL)</option>
+                    <option value="bKash Merchant">bKash Merchant</option>
+                    <option value="Nagad Enterprise">Nagad Enterprise</option>
+                    <option value="Pay Order / Cheque">Pay Order / Cheque</option>
+                    <option value="Cash Voucher">Cash Voucher</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Payment Status
+                  </label>
+                  <select
+                    value={formData.status}
+                    onChange={(e) => setFormData({ ...formData, status: e.target.value as any })}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-900"
+                  >
+                    <option value="paid">Disbursed (Paid)</option>
+                    <option value="pending">Pending Approval</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Disbursement Date
+                  </label>
+                  <input
+                    type="date"
+                    value={formData.payment_date}
+                    onChange={(e) => setFormData({ ...formData, payment_date: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-900 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                    Transaction / Check Reference
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.transaction_ref}
+                    onChange={(e) => setFormData({ ...formData, transaction_ref: e.target.value })}
+                    placeholder="e.g. SAL-982341"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-900 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-600 font-bold mb-1">
+                  Accounting Notes / Allocation Remarks
+                </label>
+                <textarea
+                  rows={2}
+                  value={formData.note}
+                  onChange={(e) => setFormData({ ...formData, note: e.target.value })}
+                  placeholder="e.g. Monthly base compensation + curriculum delivery honorarium"
+                  className="w-full px-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 p-4 bg-slate-50 border-t border-slate-200 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                className="px-4 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium shadow-sm transition disabled:opacity-50"
+              >
+                {submitting ? 'Recording Disbursement...' : 'Post Salary Disbursement to Ledger'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+      )}
+
+      {/* Official Salary Voucher Modal */}
+      {viewingVoucher && (
+        <div className="printable-voucher-modal fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="printable-voucher-card border border-slate-400 bg-white max-w-lg w-full max-h-[90vh] flex flex-col shadow-2xl my-auto overflow-hidden print:max-h-none print:shadow-none print:border-slate-800 print:w-full print:max-w-none">
+            {/* Header */}
+            <div className="flex items-start justify-between border-b-2 border-slate-900 p-5 sm:p-6 shrink-0 bg-white">
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-widest text-slate-500 font-bold">
+                  EDUSATHI REGISTRAR &amp; COMPTROLLER
+                </div>
+                <h3 className="text-lg font-bold uppercase tracking-tight text-slate-900 mt-0.5">
+                  Official Faculty Salary Voucher
+                </h3>
+                <p className="text-[10px] text-slate-500 font-mono">
+                  Voucher No: {viewingVoucher.transaction_ref || 'VOUCH-SAL-OFFICIAL'}
+                </p>
+              </div>
+              <button
+                onClick={() => setViewingVoucher(null)}
+                className="print:hidden p-1 text-slate-400 hover:text-slate-700 border border-slate-200 hover:border-slate-400 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Scrollable Body */}
+            <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-5 print:overflow-visible print:max-h-none print:p-4">
+              {/* Identification Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono border-b border-slate-200 pb-4">
+                <div>
+                  <span className="text-[10px] uppercase text-slate-500 font-bold block">Faculty Member</span>
+                  <span className="font-semibold text-slate-900 text-sm block mt-0.5">
+                    {viewingVoucher.teacher_name || 'N/A'}
+                  </span>
+                  <span className="text-[11px] text-slate-500 block">
+                    Dept: {viewingVoucher.teacher_department || 'Academic Faculty'}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block truncate">
+                    {viewingVoucher.teacher_email}
+                  </span>
+                </div>
+                <div className="text-left sm:text-right">
+                  <span className="text-[10px] uppercase text-slate-500 font-bold block">Disbursement Date</span>
+                  <span className="text-slate-800 block mt-0.5">
+                    {viewingVoucher.payment_date ? new Date(viewingVoucher.payment_date).toLocaleDateString() : new Date().toLocaleDateString()}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    Period: <strong className="text-slate-900">{viewingVoucher.pay_period}</strong>
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">
+                    Rail: {viewingVoucher.payment_method || 'Bank Transfer'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Compensation Breakdown */}
+              <div className="border border-slate-200 text-xs">
+                <div className="bg-slate-100 p-2.5 font-mono text-[10px] uppercase font-bold text-slate-700 flex justify-between">
+                  <span>Instructional Compensation Line Item</span>
+                  <span>Amount</span>
+                </div>
+                <div className="p-3 space-y-2">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="font-bold text-slate-900">Monthly Teaching &amp; Academic Base</div>
+                      <div className="text-[11px] text-slate-500">
+                        Term Pay Period: {viewingVoucher.pay_period}
+                      </div>
+                      <div className="text-[11px] text-indigo-700 font-semibold mt-0.5">
+                        Course Allocation: {viewingVoucher.course_title ? `${viewingVoucher.course_title} (${viewingVoucher.subject_code || 'CRS'})` : 'All Assigned Courses (General Faculty Load)'}
+                      </div>
+                      {viewingVoucher.note && (
+                        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                          Note: {viewingVoucher.note}
+                        </div>
+                      )}
+                    </div>
+                    <div className="font-mono font-bold text-slate-900">
+                      ৳ {Number(viewingVoucher.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
+                    <div className="flex justify-between text-slate-600">
+                      <span>Gross Compensation:</span>
+                      <span>৳ {Number(viewingVoucher.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Statutory Tax Withholding:</span>
+                      <span>৳ 0.00</span>
+                    </div>
+                    <div className="flex justify-between text-emerald-800 font-bold pt-1 border-t border-slate-200 text-xs">
+                      <span>Net Disbursed Amount:</span>
+                      <span>৳ {Number(viewingVoucher.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Seal & Status */}
+              <div className="flex items-center justify-between p-3 border border-slate-200 bg-slate-50 text-[11px] font-mono">
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Ledger Status</span>
+                  <span className={`font-bold uppercase ${viewingVoucher.status === 'paid' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {viewingVoucher.status === 'paid' ? 'VERIFIED • DISBURSED & SETTLED' : 'PENDING • AWAITING RELEASE'}
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Disbursing Officer</span>
+                  <span className="text-slate-700 font-bold">COMPTROLLER OF ACCOUNTS</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Pinned Footer Actions */}
+            <div className="print:hidden flex items-center justify-between p-4 bg-slate-50 border-t border-slate-200 shrink-0">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="px-3.5 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-mono font-medium transition inline-flex items-center gap-1.5"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>Print Official Voucher</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewingVoucher(null)}
+                className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium transition"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

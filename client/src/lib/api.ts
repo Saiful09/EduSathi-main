@@ -1,0 +1,198 @@
+function resolveApiBase(): string {
+  const envUrl = ((import.meta as any).env?.VITE_API_URL || '').trim();
+  if (!envUrl) {
+    return '/api';
+  }
+  const cleanUrl = envUrl.replace(/\/+$/, '');
+  return cleanUrl.endsWith('/api') ? cleanUrl : `${cleanUrl}/api`;
+}
+
+const API_BASE = resolveApiBase();
+
+export function getToken(): string | null {
+  return localStorage.getItem('edusathi_token');
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem('edusathi_token', token);
+}
+
+export function removeToken(): void {
+  localStorage.removeItem('edusathi_token');
+}
+
+async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.message || `Request failed with status ${response.status}`);
+  }
+
+  if (data.data !== undefined) {
+    if (typeof data.data === 'object' && data.data !== null && !Array.isArray(data.data)) {
+      return { ...data, ...data.data } as T;
+    }
+    return data.data as T;
+  }
+
+  return data as T;
+}
+
+export const api = {
+  // Auth
+  login: (credentials: any) => request<any>('/auth/login', { method: 'POST', body: JSON.stringify(credentials) }),
+  register: (payload: any) => request<any>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  forgotPassword: (payload: { email: string; new_password: string }) =>
+    request<any>('/auth/forgot-password', { method: 'POST', body: JSON.stringify(payload) }),
+  sendPasswordResetCode: (payload: { email: string }) =>
+    request<any>('/auth/forgot-password/send-code', { method: 'POST', body: JSON.stringify(payload) }),
+  verifyAndResetPassword: (payload: { email: string; code: string; new_password: string }) =>
+    request<any>('/auth/forgot-password/verify', { method: 'POST', body: JSON.stringify(payload) }),
+  logout: () => request<any>('/auth/logout', { method: 'POST' }),
+  getMe: () => request<any>('/auth/me'),
+  updateProfile: (profile: any) => request<any>('/me/profile', { method: 'PATCH', body: JSON.stringify(profile) }),
+
+  // Users (Admin)
+  getUsers: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/users${q}`);
+  },
+  createUser: (user: any) => request<any>('/users', { method: 'POST', body: JSON.stringify(user) }),
+  updateUser: (id: string, payload: any) => request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+
+  // Subjects
+  getSubjects: () => request<any[]>('/subjects'),
+  createSubject: (subj: any) => request<any>('/subjects', { method: 'POST', body: JSON.stringify(subj) }),
+
+  // Courses
+  getCourses: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/courses${q}`);
+  },
+  getCourse: (courseId: string) => request<any>(`/courses/${courseId}`),
+  createCourse: (course: any) => request<any>('/courses', { method: 'POST', body: JSON.stringify(course) }),
+  updateCourse: (courseId: string, payload: any) => request<any>(`/courses/${courseId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteCourse: (courseId: string) => request<any>(`/courses/${courseId}`, { method: 'DELETE' }),
+  enrollCourse: (courseId: string, studentId?: string) => request<any>(`/courses/${courseId}/enroll`, { method: 'POST', body: JSON.stringify({ student_id: studentId }) }),
+  getCourseTeachers: (courseId: string) => request<any[]>(`/courses/${courseId}/teachers`),
+  assignCourseTeacher: (courseId: string, teacherId: string) => request<any>(`/courses/${courseId}/teachers`, { method: 'POST', body: JSON.stringify({ teacher_id: teacherId }) }),
+  removeCourseTeacher: (courseId: string, teacherId: string) => request<any>(`/courses/${courseId}/teachers/${teacherId}`, { method: 'DELETE' }),
+  getCourseStudents: (courseId: string) => request<any[]>(`/courses/${courseId}/students`),
+  getCourseStudentsPerformance: (courseId: string) => request<any>(`/courses/${courseId}/students-performance`),
+  unenrollCourseStudent: (courseId: string, studentId: string) => request<any>(`/courses/${courseId}/students/${studentId}`, { method: 'DELETE' }),
+  getCourseRoadmap: (courseId: string) => request<any>(`/courses/${courseId}/roadmap`),
+  saveCourseRoadmap: (courseId: string, roadmapData: any) => request<any>(`/courses/${courseId}/roadmap`, { method: 'PUT', body: JSON.stringify({ roadmap_data: roadmapData }) }),
+  getMyCourses: () => request<any[]>('/me/courses'),
+
+  // Modules & Lessons
+  addModule: (courseId: string, title: string) => request<any>(`/courses/${courseId}/modules`, { method: 'POST', body: JSON.stringify({ title }) }),
+  addLesson: (moduleId: string, lesson: any) => request<any>(`/modules/${moduleId}/lessons`, { method: 'POST', body: JSON.stringify(lesson) }),
+  markLessonProgress: (lessonId: string) => request<any>(`/lessons/${lessonId}/progress`, { method: 'POST' }),
+
+  // Quizzes
+  createQuiz: (courseId: string, quiz: any) => request<any>(`/courses/${courseId}/quizzes`, { method: 'POST', body: JSON.stringify(quiz) }),
+  getCourseQuizzes: (courseId: string) => request<any[]>(`/courses/${courseId}/quizzes`),
+  getTeacherQuizzes: () => request<any[]>('/teacher/quizzes'),
+  getQuiz: (quizId: string) => request<any>(`/quizzes/${quizId}`),
+  submitQuizAttempt: (quizId: string, answers: any) => request<any>(`/quizzes/${quizId}/attempts`, { method: 'POST', body: JSON.stringify({ answers }) }),
+  getQuizAttempts: (quizId: string) => request<any>(`/quizzes/${quizId}/attempts`),
+  getMyQuizResults: () => request<any[]>('/me/quiz-results'),
+
+  // Assignments
+  createAssignment: (courseId: string, asg: any) => request<any>(`/courses/${courseId}/assignments`, { method: 'POST', body: JSON.stringify(asg) }),
+  getCourseAssignments: (courseId: string) => request<any[]>(`/courses/${courseId}/assignments`),
+  getStudentAssignments: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/student/assignments${q}`);
+  },
+  getTeacherAssignments: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/teacher/assignments${q}`);
+  },
+  getAssignment: (assignmentId: string) => request<any>(`/assignments/${assignmentId}`),
+  submitAssignment: (assignmentId: string, payload: any) => request<any>(`/assignments/${assignmentId}/submissions`, { method: 'POST', body: JSON.stringify(payload) }),
+  getAssignmentSubmissions: (assignmentId: string) => request<any[]>(`/assignments/${assignmentId}/submissions`),
+  gradeSubmission: (submissionId: string, grade: any) => request<any>(`/submissions/${submissionId}/grade`, { method: 'PATCH', body: JSON.stringify(grade) }),
+  getMyGrades: () => request<any[]>('/me/grades'),
+  getGradebook: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/teacher/gradebook${q}`);
+  },
+
+  // Attendance
+  createAttendanceSession: (courseId: string, session: any) => request<any>(`/courses/${courseId}/attendance-sessions`, { method: 'POST', body: JSON.stringify(session) }),
+  getCourseAttendance: (courseId: string) => request<any>(`/courses/${courseId}/attendance`),
+  updateAttendanceSession: (sessionId: string, payload: any) => request<any>(`/attendance-sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  studentCheckIn: (sessionId: string) => request<any>('/attendance/check-in', { method: 'POST', body: JSON.stringify({ session_id: sessionId }) }),
+  getMyActiveAttendanceSessions: () => request<any[]>('/me/active-attendance-sessions'),
+  getMyAttendance: () => request<any>('/me/attendance'),
+
+  // Analytics
+  getStudentAnalytics: () => request<any>('/analytics/student'),
+  getTeacherAnalytics: (courseId?: string) => request<any>(`/analytics/teacher${courseId ? `?courseId=${courseId}` : ''}`),
+  getTeacherCourseAnalytics: (courseId: string) => request<any>(`/analytics/teacher/course/${courseId}`),
+  getAdminAnalytics: () => request<any>('/analytics/admin'),
+
+  // Announcements & Discussions
+  getAnnouncements: (courseId: string) => request<any[]>(`/courses/${courseId}/announcements`),
+  createAnnouncement: (courseId: string, payload: any) => request<any>(`/courses/${courseId}/announcements`, { method: 'POST', body: JSON.stringify(payload) }),
+  getComments: (params: Record<string, string>) => {
+    const q = '?' + new URLSearchParams(params).toString();
+    return request<any[]>(`/comments${q}`);
+  },
+  createComment: (payload: any) => request<any>('/comments', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // Notifications
+  getNotifications: () => request<any[]>('/notifications'),
+  markNotificationRead: (id: string) => request<any>(`/notifications/${id}/read`, { method: 'PATCH' }),
+  markAllNotificationsRead: () => request<any>('/notifications/read-all', { method: 'POST' }),
+
+  // AI Assistant
+  getAiModels: () => request<{ models: any[]; defaultModel: string }>('/ai/models'),
+  askAiAssistant: (payload: { prompt: string; course_id?: string; mode?: string; history?: Array<{ role: string; text: string }>; model?: string; provider?: string }) => request<any>('/ai/study-assistant', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // Finance & Salaries
+  getTeacherSalaries: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/finance/salaries${q}`);
+  },
+  getTeacherSalariesSummary: () => request<any>('/finance/salaries/summary'),
+  recordTeacherSalary: (payload: any) => request<any>('/finance/salaries', { method: 'POST', body: JSON.stringify(payload) }),
+  disburseTeacherSalary: (salaryId: string) => request<any>(`/finance/salaries/${salaryId}/disburse`, { method: 'PATCH' }),
+  getTeacherFinanceDetails: (teacherId: string) => request<any>(`/finance/teachers/${teacherId}/compensation`),
+
+  // Student Payments & Dues
+  getStudentPayments: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : '';
+    return request<any[]>(`/finance/student-payments${q}`);
+  },
+  getStudentPaymentsSummary: () => request<any>('/finance/student-payments/summary'),
+  recordStudentPayment: (payload: any) => request<any>('/finance/student-payments', { method: 'POST', body: JSON.stringify(payload) }),
+  settleStudentPayment: (paymentId: string, payload: any) => request<any>(`/finance/student-payments/${paymentId}/pay`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  getStudentFinanceDetails: (studentId: string) => request<any>(`/finance/students/${studentId}/ledger`),
+
+  // Self-Service Finance
+  getMyStudentPayments: () => request<any>('/me/payments'),
+  settleMyStudentDue: (payload: { payment_id: string; amount?: number; payment_method?: string; transaction_ref?: string; note?: string }) =>
+    request<any>('/me/payments/settle', { method: 'POST', body: JSON.stringify(payload) }),
+  purchaseCoursePayment: (payload: { course_id: string; amount_to_pay?: number; payment_method?: string; transaction_ref?: string; note?: string }) =>
+    request<any>('/me/payments/buy-course', { method: 'POST', body: JSON.stringify(payload) }),
+  getMyTeacherSalaries: () => request<any>('/me/salaries'),
+  requestTeacherSalary: (payload: { course_id?: string; amount: number; pay_period: string; note?: string }) =>
+    request<any>('/me/salaries/request', { method: 'POST', body: JSON.stringify(payload) }),
+};
